@@ -1,254 +1,451 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from sklearn.linear_model import LinearRegression
 
-# Set up the page and explain its purpose.
-st.set_page_config(page_title="How Much Should I Bake Tomorrow?")
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, mean_absolute_error
+
+# --------------------------------------------------
+# PAGE SETUP
+# --------------------------------------------------
+
+st.set_page_config(
+    page_title="How Much Should I Bake Tomorrow?",
+    layout="wide"
+)
 
 st.title("How Much Should I Bake Tomorrow?")
-st.caption("Explore bakery sales and predict sales for individual products.")
 
 st.write(
-    "This model predicts daily bakery sales to support production planning; "
-    "overestimates may cause food waste, while underestimates may lead "
-    "to stockouts and lost sales."
+    "Explore historical bakery sales and predict "
+    "how many units to produce tomorrow using "
+    "linear regression."
 )
 
-st.write(
-    "Use historical sales patterns and your recent sales information to "
-    "estimate tomorrow's sales and help plan tomorrow morning's baking. "
-    "The default forecast assumes the bakery will be open tomorrow."
+st.info(
+    "This model helps estimate tomorrow's bakery demand. "
+    "If the prediction is too high, unsold products may "
+    "be wasted. If it is too low, the bakery may sell "
+    "out and lose potential sales."
 )
 
-# Give the CSV columns readable labels and explanations.
-labels = {
+WEEKDAYS = [
+    "Monday", "Tuesday", "Wednesday",
+    "Thursday", "Friday", "Saturday", "Sunday"
+]
+
+LABELS = {
     "units_sold_today": "Units sold today",
-    "last_7_day_avg": "Average daily units sold over the last seven days",
+    "last_7_day_avg": "Last 7-day sales average",
     "units_sold_tomorrow": "Units sold tomorrow"
 }
 
-tips = {
-    "units_sold_today": (
-        "The selected product's total sales for today, after sales are complete."
-    ),
-    "last_7_day_avg": (
-        "Add this product's sales for today and the previous six calendar "
-        "days, then divide by seven. Include known closure days as zero."
-    ),
-    "units_sold_tomorrow": (
-        "The following calendar day's sales. This is normally the target "
-        "you want to predict."
-    )
-}
 
-# Upload and preview the prepared data.
+# --------------------------------------------------
+# MODEL FEATURE ENGINEERING
+# --------------------------------------------------
+
+def build_features(data):
+    """
+    Prepare the numeric inputs and weekday
+    interaction terms for linear regression.
+
+    Weekday interactions allow different
+    relationships between today's sales and
+    tomorrow's sales for each weekday.
+    """
+
+    X = data[
+        ["units_sold_today", "last_7_day_avg"]
+    ].copy()
+
+    weekdays = data["date"].dt.day_name()
+
+    for day in WEEKDAYS:
+        flag = (weekdays == day).astype(int)
+
+        X[f"day_{day}"] = flag
+
+        X[f"sales_x_day_{day}"] = (
+            data["units_sold_today"] * flag
+        )
+
+    return X
+
+
+def make_prediction_input(
+    today_sales, seven_day_avg, weekday, columns
+):
+    """
+    Create a prediction row with the same
+    feature columns used during training.
+    """
+
+    new_X = pd.DataFrame(
+        0.0,
+        index=[0],
+        columns=columns
+    )
+
+    new_X["units_sold_today"] = today_sales
+    new_X["last_7_day_avg"] = seven_day_avg
+
+    new_X[f"day_{weekday}"] = 1
+    new_X[f"sales_x_day_{weekday}"] = today_sales
+
+    return new_X
+
+
+# --------------------------------------------------
+# 1. UPLOAD DATA
+# --------------------------------------------------
+
+st.header("1. Upload Bakery Sales Data")
+
 uploaded_file = st.file_uploader(
-    "Upload bakery_app_data.csv",
-    type=["csv"],
-    help="Use the finished CSV from your Bakery Data Prep notebook."
+    "Upload your prepared bakery sales CSV",
+    type=["csv"]
 )
 
 if uploaded_file is None:
-    st.info("Upload your CSV to begin.")
+    st.info("Upload a CSV file to begin.")
     st.stop()
 
 df = pd.read_csv(uploaded_file)
 
-required_columns = ["date", "article"] + list(labels)
-if not set(required_columns).issubset(df.columns):
-    st.error("Please upload bakery_app_data.csv with the five prepared columns.")
+required_columns = [
+    "date",
+    "article",
+    "units_sold_today",
+    "last_7_day_avg",
+    "units_sold_tomorrow"
+]
+
+missing = [
+    col for col in required_columns
+    if col not in df.columns
+]
+
+if missing:
+    st.error(
+        f"The uploaded CSV is missing: {missing}"
+    )
     st.stop()
 
-df["date"] = pd.to_datetime(df["date"])
+df["date"] = pd.to_datetime(
+    df["date"], errors="coerce"
+)
 
-st.subheader("1. Preview your data")
-st.dataframe(df.head(10))
+for col in LABELS:
+    df[col] = pd.to_numeric(
+        df[col], errors="coerce"
+    )
 
-# Select one product for both charts and regression.
-products = sorted(df["article"].dropna().unique())
+df = df.dropna(subset=["date", "article"])
 
-if not products:
-    st.error("The file contains no products.")
-    st.stop()
+st.write("Preview of uploaded data:")
+st.dataframe(
+    df.head(10),
+    use_container_width=True
+)
+
+products = sorted(df["article"].unique())
+
+default_index = (
+    products.index("BAGUETTE")
+    if "BAGUETTE" in products else 0
+)
 
 product = st.selectbox(
-    "Choose a product",
+    "Choose a bakery product",
     products,
-    index=products.index("BAGUETTE") if "BAGUETTE" in products else 0,
-    help="Charts and predictions use only this product's history."
+    index=default_index
 )
 
 product_df = (
-    df.loc[df["article"] == product]
+    df[df["article"] == product]
     .sort_values("date")
     .copy()
 )
 
-numeric_columns = list(labels)
 
-# Let users choose a column and chart type.
-st.subheader("2. Explore sales")
+# --------------------------------------------------
+# 2. EXPLORE HISTORICAL SALES
+# --------------------------------------------------
 
-chart_column = st.selectbox(
-    "Column to explore",
-    numeric_columns,
-    format_func=lambda column: labels[column],
-    help="Choose the sales measure to display."
-)
+st.header("2. Explore Historical Sales")
 
-chart_type = st.selectbox(
-    "Chart type",
-    ["Line", "Scatter", "Histogram"],
-    help=(
-        "Line: changes over time. Scatter: relationships between columns. "
-        "Histogram: how frequently different values occur."
+numeric_columns = list(LABELS.keys())
+
+col1, col2 = st.columns(2)
+
+with col1:
+    chart_column = st.selectbox(
+        "Choose a numeric column",
+        numeric_columns,
+        format_func=lambda x: LABELS[x]
     )
-)
+
+with col2:
+    chart_type = st.selectbox(
+        "Choose a chart type",
+        ["Line", "Scatter", "Histogram"]
+    )
 
 if chart_type == "Line":
-    # Insert blank dates so excluded dates appear as gaps.
-    chart_data = (
-        product_df.set_index("date")[[chart_column]]
-        .asfreq("D")
-        .reset_index()
-    )
 
     fig = px.line(
-        chart_data,
+        product_df,
         x="date",
         y=chart_column,
-        labels=labels
+        title=f"{product}: Sales Over Time"
     )
-    fig.update_traces(connectgaps=False)
 
 elif chart_type == "Scatter":
+
+    x_options = [
+        c for c in numeric_columns
+        if c != chart_column
+    ]
+
     x_column = st.selectbox(
-        "Horizontal-axis column",
-        [column for column in numeric_columns if column != chart_column],
-        format_func=lambda column: labels[column],
-        help="Compare this column with the measure selected above."
+        "Choose the X-axis",
+        x_options,
+        format_func=lambda x: LABELS[x]
     )
 
     fig = px.scatter(
         product_df,
         x=x_column,
         y=chart_column,
-        labels=labels,
-        hover_data=["date"]
+        title=f"{product}: Sales Relationship"
     )
 
 else:
+
     fig = px.histogram(
         product_df,
         x=chart_column,
         nbins=20,
-        labels=labels
+        title=f"{product}: Sales Distribution"
     )
 
-st.plotly_chart(fig)
-st.caption(
-    "Charts show only dates retained during preparation. "
-    "Date refers to 'today' in each row; tomorrow's sales occur one day later."
+st.plotly_chart(
+    fig,
+    use_container_width=True
 )
 
-# Let users choose the target and two different inputs.
-st.subheader("3. Make a prediction")
 
-target = st.selectbox(
-    "Target: what do you want to predict?",
-    numeric_columns,
-    index=2,
-    format_func=lambda column: labels[column],
-    help="Choose Units sold tomorrow for the intended baking forecast."
+# --------------------------------------------------
+# 3. TRAIN REGRESSION MODEL
+# --------------------------------------------------
+
+st.header("3. Predict Tomorrow's Production")
+
+st.write(
+    "This forecast uses today's sales, the recent "
+    "7-day sales average, and historical weekday "
+    "patterns to estimate tomorrow's demand."
 )
 
-input_options = [column for column in numeric_columns if column != target]
-
-input_1 = st.selectbox(
-    "Input 1",
-    input_options,
-    format_func=lambda column: labels[column],
-    help="The first piece of information available when making a prediction."
-)
-
-input_2 = st.selectbox(
-    "Input 2",
-    [column for column in input_options if column != input_1],
-    format_func=lambda column: labels[column],
-    help="The second piece of information available when making a prediction."
-)
-
-inputs = [input_1, input_2]
-
-if target != "units_sold_tomorrow":
-    st.info(
-        "This selection explores a historical relationship. "
-        "To forecast tomorrow, choose Units sold tomorrow as the target."
+data = (
+    product_df.dropna(
+        subset=[
+            "units_sold_today",
+            "last_7_day_avg",
+            "units_sold_tomorrow"
+        ]
     )
+    .sort_values("date")
+    .reset_index(drop=True)
+)
 
-# Fit multiple linear regression using the selected columns.
-data = product_df[inputs + [target]].dropna()
-
-if len(data) < 5:
-    st.warning("There are too few complete rows to fit this model.")
+if len(data) < 25:
+    st.warning(
+        "There are not enough complete historical "
+        "observations to train this model."
+    )
     st.stop()
 
-X = data[inputs]
-y = data[target]
+# Prepare the regression inputs.
+X = build_features(data)
+y = data["units_sold_tomorrow"]
 
+# Chronological train/test split.
+split = int(len(data) * 0.8)
+
+X_train = X.iloc[:split]
+X_test = X.iloc[split:]
+
+y_train = y.iloc[:split]
+y_test = y.iloc[split:]
+
+# Fit linear regression.
 model = LinearRegression()
-model.fit(X, y)
+model.fit(X_train, y_train)
 
-st.metric("Training R²", f"{model.score(X, y):.2f}")
-st.caption(
-    "This measures fit to the historical training data, "
-    "not accuracy on future sales."
+# Evaluate on unseen data.
+train_r2 = model.score(X_train, y_train)
+
+test_predictions = model.predict(X_test)
+
+test_r2 = r2_score(
+    y_test, test_predictions
 )
 
-# Collect values using tooltips specific to each input.
-with st.form("prediction"):
-    values = {}
+test_mae = mean_absolute_error(
+    y_test, test_predictions
+)
 
-    for column in inputs:
-        values[column] = st.number_input(
-            labels[column],
-            min_value=0.0,
-            value=max(0.0, float(data[column].median())),
-            help=tips[column],
-            key=f"{product}_{column}"
+
+# --------------------------------------------------
+# 4. USER FORECAST INPUTS
+# --------------------------------------------------
+
+st.subheader("Enter Today's Sales Information")
+
+with st.form("forecast_form"):
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        today_sales = st.number_input(
+            "Units sold today",
+            min_value=0,
+            value=30,
+            step=1
         )
 
-    submitted = st.form_submit_button("Predict")
+    with col2:
+        seven_day_avg = st.number_input(
+            "Last 7-day sales average",
+            min_value=0.0,
+            value=28.0,
+            step=1.0
+        )
 
-if submitted:
-    # Match the training column names AND their order.
-    new_data = pd.DataFrame(
-        [[values[column] for column in inputs]],
-        columns=inputs
+    with col3:
+        weekday = st.selectbox(
+            "Today's day of week",
+            WEEKDAYS
+        )
+
+    predict_button = st.form_submit_button(
+        "Calculate Tomorrow's Production",
+        type="primary"
     )
 
-    prediction = model.predict(new_data)[0]
 
-    st.metric(
-        f"Predicted {labels[target].lower()}",
-        f"{prediction:.1f} units"
+# --------------------------------------------------
+# 5. FORECAST RESULTS
+# --------------------------------------------------
+
+if predict_button:
+
+    new_X = make_prediction_input(
+        today_sales,
+        seven_day_avg,
+        weekday,
+        X.columns
     )
 
-    if prediction < 0:
-        st.warning("A negative sales estimate is not usable for baking plans.")
+    raw_prediction = model.predict(new_X)[0]
 
-    if any(
-        values[column] < data[column].min()
-        or values[column] > data[column].max()
-        for column in inputs
-    ):
-        st.warning(
-            "An input is outside the historical range. "
-            "Treat this prediction with extra caution."
+    # Production cannot be negative.
+    recommended_units = max(
+        0, round(float(raw_prediction))
+    )
+
+    # Identify tomorrow's weekday.
+    tomorrow_index = (
+        WEEKDAYS.index(weekday) + 1
+    ) % 7
+
+    tomorrow = WEEKDAYS[tomorrow_index]
+
+    st.divider()
+
+    st.subheader("Your Production Recommendation")
+
+    st.write(
+        "Based on historical sales patterns "
+        "and your input data:"
+    )
+
+    st.markdown(
+        f"### You should make approximately "
+        f"{recommended_units:,} {product.lower()} "
+        f"tomorrow ({tomorrow})."
+    )
+
+    st.write(
+        f"Historical predictions have been off by "
+        f"an average of **{test_mae:.2f} units**."
+    )
+
+    st.divider()
+
+    st.subheader("Model Performance")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.metric(
+            "Test R²",
+            f"{test_r2:.3f}"
+        )
+
+        st.caption(
+            "Measures how well the model explains "
+            "sales variation in the test dataset."
+        )
+
+    with col2:
+        st.metric(
+            "Average Prediction Error (MAE)",
+            f"±{test_mae:.2f} units"
+        )
+
+        st.caption(
+            "Average absolute difference between "
+            "predicted and actual sales in the "
+            "test dataset. This is not a "
+            "guaranteed prediction interval."
+        )
+
+    with st.expander("More about this regression"):
+
+        st.write(
+            f"Product: {product}"
+        )
+
+        st.write(
+            f"Training observations: {len(X_train)}"
+        )
+
+        st.write(
+            f"Testing observations: {len(X_test)}"
+        )
+
+        st.write(
+            f"Training R²: {train_r2:.3f}"
+        )
+
+        st.write(
+            "Model: Linear regression using today's "
+            "sales, the seven-day average, and "
+            "weekday interaction variables."
+        )
+
+        st.write(
+            "The model uses 80% of historical "
+            "observations for training and the "
+            "most recent 20% for testing."
         )
 
     st.caption(
-        "Predicted sales help guide production; they are not a guaranteed "
-        "quantity needed. Past sales may understate demand when items sold out."
+        "Forecasts are estimates based on historical "
+        "sales. Actual demand may differ, and "
+        "historical sales may understate demand "
+        "when products have sold out."
     )
