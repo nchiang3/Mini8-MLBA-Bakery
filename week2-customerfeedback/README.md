@@ -61,3 +61,9 @@ streamlit run app.py
 **Storage limitation:** The app saves feedback in `feedback.csv` on its local filesystem. On free Streamlit Cloud, this may be deleted when the app restarts/redeploys and multiple app instances can cause inconsistencies. Download CSV feedback regularly. A production version should use persistent storage.
 
 **Data limitations:** The five-star rating from a rating-only entry cannot be assigned to any specific product; it is saved as `General`. The sentiment chart only uses written comments; the rating chart only uses entries containing stars. The model may still misinterpret ambiguous comments despite spelling-tolerant instructions.
+
+## Add the 35 fictional sample reviews
+
+`bakery_sample_feedback_35.csv` is included in this repo. On the **Owner: analyze feedback** tab, open **Load sample feedback for this assignment** and click **Import sample reviews**. The app sends each written demo comment to Groq for a sentiment label and product match, and stores the results in its local `feedback.csv`. Rating-only reviews don't use Groq. It skips identical comment-and-rating pairs already in the saved file, so you can safely retry an interrupted import. Groq requests may take a bit of time, and an API limit or other failure can stop the import early; rerun it to continue.
+
+**No real feedback is bundled or automatically loaded.** The Owner must click Import to add the demo data. These are fictional reviews for demonstration, not actual customer responses. On Streamlit Community Cloud, `feedback.csv` is **ephemeral**; the data survives ordinary page refreshes while the app container persists but may be lost when it restarts or redeploys. The import can be run again to repopulate the demonstration. Download the feedback CSV for safekeeping. No API key or `feedback.csv` should be committed to GitHub.
