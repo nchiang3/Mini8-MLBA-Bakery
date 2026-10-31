@@ -1,5 +1,4 @@
 """Bakery customer feedback: Week 2 ML Business Applications."""
-import os
 from datetime import datetime
 from pathlib import Path
 
@@ -12,6 +11,7 @@ from labeler import label_comment, load_products
 # ---- Settings (same structure as the professor's pizza starter) ---------
 TITLE = "Bakery Customer Feedback"
 DATA_FILE = Path(__file__).with_name("feedback.csv")
+DEMO_FILE = Path(__file__).with_name("bakery_sample_feedback_35.csv")
 LOW_RATING, HIGH_RATING = 2, 4
 COLORS = {"positive": "#2BB38A", "mixed": "#E6AD47", "negative": "#D35F58", "unclear": "#999999"}
 LABEL_ORDER = ["positive", "mixed", "negative", "unclear"]
@@ -32,6 +32,58 @@ def load_feedback():
     table["label"] = table["label"].fillna("")
     table["comment"] = table["comment"].fillna("")
     return table[COLUMNS]
+
+
+def import_demo_feedback(existing, progress_callback=None):
+    """Classify bundled demo comments, append only new (comment, rating) pairs."""
+    demo = pd.read_csv(DEMO_FILE).fillna({"comment": ""})
+    if not {"comment", "rating"}.issubset(demo.columns):
+        raise ValueError("Demo CSV must contain comment and rating columns.")
+
+    def signature(comment, rating):
+        comment_key = "" if pd.isna(comment) else str(comment).strip().casefold()
+        rating_key = None if pd.isna(rating) or str(rating).strip() == "" else int(float(rating))
+        return comment_key, rating_key
+
+    seen = {signature(record.comment, record.rating) for record in existing.itertuples(index=False)}
+    added = 0
+    skipped = 0
+    errors = []
+    total = len(demo)
+    for i, record in enumerate(demo.itertuples(index=False), 1):
+        comment = "" if pd.isna(record.comment) else str(record.comment).strip()
+        rating = pd.to_numeric(record.rating, errors="coerce")
+        if not pd.isna(rating) and (rating != int(rating) or not 1 <= rating <= 5):
+            errors.append(f"Row {i}: invalid star rating")
+            continue
+        if not comment and pd.isna(rating):
+            errors.append(f"Row {i}: blank comment and rating")
+            continue
+        key = signature(comment, rating)
+        if key in seen:
+            skipped += 1
+        else:
+            try:
+                label, product = label_comment(comment) if comment else ("", "General")
+                new_row = pd.DataFrame([{
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "comment": comment,
+                    "rating": None if pd.isna(rating) else int(rating),
+                    "label": label,
+                    "product": product,
+                }])
+                existing = pd.concat([existing, new_row], ignore_index=True)
+                # Save each successful result, even if a later API request fails.
+                existing.to_csv(DATA_FILE, index=False)
+                seen.add(key)
+                added += 1
+            except Exception as exc:
+                errors.append(f"Row {i}: {exc}")
+                # Auth or rate-limit issues may affect all remaining rows; stop early.
+                break
+        if progress_callback:
+            progress_callback(i / total, added, skipped)
+    return added, skipped, errors
 
 
 def get_review_flags(table):
@@ -136,6 +188,32 @@ with tab_customer:
                 st.caption(f"Error details: {exc}")
 
 with tab_owner:
+    with st.expander("Load sample feedback for this assignment", expanded=df.empty):
+        st.write("Import 35 fictional bakery reviews from the bundled demo CSV. "
+                 "Written comments are classified by Groq, and existing identical reviews are skipped.")
+        st.caption("This uses Groq API calls and may take some time. "
+                   "The demo reviews are not real customer feedback.")
+        if st.button("Import sample reviews", type="secondary"):
+            progress = st.progress(0, text="Preparing demo reviews...")
+            try:
+                added, skipped, errors = import_demo_feedback(
+                    df,
+                    lambda fraction, a, b: progress.progress(
+                        fraction, text=f"Imported {a} · Skipped {b} duplicates"
+                    ),
+                )
+                df = load_feedback()
+                if added:
+                    st.success(f"Imported {added} new reviews. Skipped {skipped} duplicates.")
+                else:
+                    st.info(f"No new reviews added. Skipped {skipped} duplicates.")
+                if errors:
+                    st.warning("Import stopped or skipped some reviews: " + "; ".join(errors[:3]))
+            except Exception as exc:
+                st.error(f"Import failed: {exc}")
+            finally:
+                progress.empty()
+
     if df.empty:
         st.info("No feedback yet. Add your first entry on the Customer tab.")
     else:
